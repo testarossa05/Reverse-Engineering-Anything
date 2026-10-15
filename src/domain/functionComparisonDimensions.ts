@@ -253,13 +253,23 @@ const swiftLiteralCoverage = (
       ? "absent"
       : "complete";
 
+const hasUnnamedEndpoint = (snapshot: FunctionSnapshot): boolean =>
+  [
+    ...snapshot.dossier.incoming_references,
+    ...snapshot.dossier.outgoing_references,
+  ].some(
+    (edge) => edge.source_procedure === null || edge.target_procedure === null,
+  );
+
 const compareReferences = (
   left: FunctionSnapshot,
   right: FunctionSnapshot,
   context: ComparisonContext,
 ): FunctionDimension => {
-  const leftProjection = referenceProjection(left);
-  const rightProjection = referenceProjection(right);
+  const sameArtifact =
+    left.subject.digest.sha256 === right.subject.digest.sha256;
+  const leftProjection = referenceProjection(left, sameArtifact);
+  const rightProjection = referenceProjection(right, sameArtifact);
   if (leftProjection.length === 0 && rightProjection.length === 0)
     return compareValues(
       "references",
@@ -284,9 +294,28 @@ const compareReferences = (
         "Reference endpoints differ independently of provider reference-kind metadata.",
       ],
     });
-  const leftKinds = referenceKindProjection(left);
-  const rightKinds = referenceKindProjection(right);
-  if (leftKinds !== null && rightKinds !== null)
+  const leftKinds = referenceKindProjection(left, sameArtifact);
+  const rightKinds = referenceKindProjection(right, sameArtifact);
+  const kindsKnown = leftKinds !== null && rightKinds !== null;
+  // Differing known edge kinds are a change whatever the endpoint identity.
+  if (
+    kindsKnown &&
+    canonicalJson(leftKinds, "Function comparison") !==
+      canonicalJson(rightKinds, "Function comparison")
+  )
+    return compareValues("references", leftKinds, rightKinds, context);
+  // Equal projections with unknown endpoints do not establish equal targets.
+  if (!sameArtifact && (hasUnnamedEndpoint(left) || hasUnnamedEndpoint(right)))
+    return unresolvedDimension({
+      dimension: "references",
+      links: context.links,
+      leftCount: leftProjection.length,
+      rightCount: rightProjection.length,
+      limitations: [
+        "Unnamed reference endpoints have no stable identity across different artifacts, so equal named endpoints do not establish equal references.",
+      ],
+    });
+  if (kindsKnown)
     return compareValues("references", leftKinds, rightKinds, context);
   return unresolvedDimension({
     dimension: "references",

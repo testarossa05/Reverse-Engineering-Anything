@@ -72,22 +72,52 @@ export const normalizeCfg = (
   return graph;
 };
 
-export const referenceProjection = (snapshot: FunctionSnapshot) =>
-  sorted([
-    ...snapshot.dossier.incoming_references.map((item) => ({
-      direction: "in",
-      source: item.source_procedure?.name ?? null,
-      target: item.target_procedure?.name ?? null,
+type ReferenceEdge = FunctionSnapshot["dossier"]["outgoing_references"][number];
+
+/**
+ * A named endpoint survives relocation. An unnamed endpoint is identified
+ * only by its address, which names one location only within one artifact;
+ * across artifacts it stays unknown (null).
+ */
+const referenceEndpoint = (
+  procedure: ReferenceEdge["source_procedure"],
+  address: string,
+  sameArtifact: boolean,
+): string | { readonly address: string } | null =>
+  procedure !== null ? procedure.name : sameArtifact ? { address } : null;
+
+export const referenceProjection = (
+  snapshot: FunctionSnapshot,
+  sameArtifact: boolean,
+) =>
+  sorted(
+    [
+      ...snapshot.dossier.incoming_references.map((item) => ({
+        direction: "in",
+        item,
+      })),
+      ...snapshot.dossier.outgoing_references.map((item) => ({
+        direction: "out",
+        item,
+      })),
+    ].map(({ direction, item }) => ({
+      direction,
+      source: referenceEndpoint(
+        item.source_procedure,
+        item.source_address,
+        sameArtifact,
+      ),
+      target: referenceEndpoint(
+        item.target_procedure,
+        item.target_address,
+        sameArtifact,
+      ),
     })),
-    ...snapshot.dossier.outgoing_references.map((item) => ({
-      direction: "out",
-      source: item.source_procedure?.name ?? null,
-      target: item.target_procedure?.name ?? null,
-    })),
-  ]);
+  );
 
 export const referenceKindProjection = (
   snapshot: FunctionSnapshot,
+  sameArtifact: boolean,
 ): readonly unknown[] | null => {
   const edges = [
     ...snapshot.dossier.incoming_references.map((edge) => ({
@@ -108,8 +138,16 @@ export const referenceKindProjection = (
         );
       return {
         direction,
-        source: edge.source_procedure?.name ?? null,
-        target: edge.target_procedure?.name ?? null,
+        source: referenceEndpoint(
+          edge.source_procedure,
+          edge.source_address,
+          sameArtifact,
+        ),
+        target: referenceEndpoint(
+          edge.target_procedure,
+          edge.target_address,
+          sameArtifact,
+        ),
         type: edge.kind.type,
         flow: edge.kind.flow,
         call: edge.kind.call,
