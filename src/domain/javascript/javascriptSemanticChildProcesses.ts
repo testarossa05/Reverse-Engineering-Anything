@@ -13,12 +13,17 @@ import {
 import {
   isUnshadowedGlobal,
   resolveSemanticBindingState,
+  semanticStableInitializer,
   type JavaScriptSemanticAnalysisState,
   type JavaScriptSemanticBindingState,
 } from "./javascriptSemanticState.js";
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
+import {
+  semanticInitializerPrecedesRead,
+  semanticReadInitializers,
+} from "./javascriptSemanticMutationInitializers.js";
 import {
   builtinDataEffectMethod,
   dataEffectLiteralString,
@@ -193,20 +198,18 @@ const childInteraction = (
   ownerCallableId: string | null,
   context: ChildInteractionContext,
 ): JavaScriptSemanticChildProcessInteraction | null => {
-  const { state, spawnByNode, spawnsByBinding } = context;
+  const { state } = context;
   const member = dataEffectMemberCallee(node);
   if (member === null) return null;
   const method = semanticStaticPropertyName(member.property, member.computed);
-  const binding = objectBinding(member.object, state);
-  const linked = resolveChildCandidates(
-    member.object,
-    binding,
-    spawnByNode,
-    spawnsByBinding,
-  );
-  if (linked.length === 0) return null;
   const classification = classifyInteraction(method, node.arguments[0]);
   if (classification === null) return null;
+  const binding = objectBinding(member.object, state);
+  const { candidates: linked, complete } = resolveChildCandidates(
+    member.object,
+    context,
+  );
+  if (linked.length === 0) return null;
   const { kind, interactionMethod, eventName } = classification;
   const listener = node.arguments[1];
   return {
@@ -224,13 +227,7 @@ const childInteraction = (
       kind === "signal" ? killSignalName(node.arguments, state) : null,
     listenerLocation:
       kind === "listener" && t.isNode(listener) ? range(listener) : null,
-    resolution:
-      linked.length === 1 &&
-      !linked[0]?.projectedResultBindings.some(
-        ({ bindingId }) => bindingId === binding?.bindingId,
-      )
-        ? "complete"
-        : "partial",
+    resolution: complete ? "complete" : "partial",
   };
 };
 
@@ -291,15 +288,89 @@ const childProcessMethod = (
 
 const resolveChildCandidates = (
   node: t.Node,
-  binding: JavaScriptSemanticBindingState | undefined,
-  spawnByNode: WeakMap<t.Node, SpawnCandidate>,
-  spawnsByBinding: ReadonlyMap<string, readonly SpawnCandidate[]>,
-): readonly SpawnCandidate[] => {
-  const direct = spawnByNode.get(node);
-  if (direct !== undefined) return [direct];
-  return binding === undefined
-    ? []
-    : (spawnsByBinding.get(binding.bindingId) ?? []);
+  context: ChildInteractionContext,
+): {
+  readonly candidates: readonly SpawnCandidate[];
+  readonly complete: boolean;
+} => {
+  const { state, spawnByNode, spawnsByBinding } = context;
+  const candidates = new Set<SpawnCandidate>();
+  const fallback = new Set<SpawnCandidate>();
+  const pending = [node];
+  const visited = new Set<t.Node>();
+  let complete = true;
+  while (pending.length > 0) {
+    const current = unwrapJavaScriptExpression(pending.pop()!).node;
+    if (visited.has(current)) {
+      complete = false;
+      continue;
+    }
+    visited.add(current);
+    // Spawn-result assignment already admits await as an identity wrapper.
+    if (t.isAwaitExpression(current)) {
+      pending.push(current.argument);
+      continue;
+    }
+    const direct = spawnByNode.get(current);
+    if (direct !== undefined) {
+      candidates.add(direct);
+      continue;
+    }
+    const binding = t.isIdentifier(current)
+      ? resolveSemanticBindingState(state, current, current.name)
+      : undefined;
+    if (binding === undefined) {
+      complete = false;
+      continue;
+    }
+    for (const candidate of spawnsByBinding.get(binding.bindingId) ?? [])
+      fallback.add(candidate);
+    // An alias captures its source at its initializer read, not at the later
+    // interaction. The shared selector retains all sources across uncertain
+    // control flow, loops and writes in other activations.
+    const selected = semanticReadInitializers(
+      binding,
+      current,
+      state.parentsByNode,
+    );
+    const initializers = [
+      ...selected.initializers,
+      ...selected.referenceInitializers,
+    ];
+    // Defaults and other reference sources do not exclude a caller-supplied
+    // value, even when they are the binding's only retained source.
+    if (initializers.length !== 1 || selected.referenceInitializers.length > 0)
+      complete = false;
+    const stable = semanticStableInitializer(binding, state);
+    for (const initializer of initializers) {
+      if (state.conditionallySkippedExpressions.has(initializer.node))
+        complete = false;
+      if (initializer.projection.length > 0) {
+        complete = false;
+        continue;
+      }
+      // A lone assignment can still be later or belong to another activation.
+      // Only initialized lexical declarations exclude an earlier undefined value
+      // without a same-body ordering proof.
+      if (
+        !(stable === initializer && !binding.declarationKinds.has("var")) &&
+        !semanticInitializerPrecedesRead(
+          initializer.node,
+          current,
+          state.parentsByNode,
+        )
+      )
+        complete = false;
+      pending.push(initializer.node);
+    }
+  }
+  // Preserve historical candidates with explicit uncertainty when the selected
+  // value cannot be established; a binding inventory alone never proves identity.
+  if (!complete) for (const candidate of fallback) candidates.add(candidate);
+  return {
+    candidates: [...candidates],
+    complete: complete && candidates.size === 1,
+  };
 };
 const spawnOptions = (candidate: SpawnCandidate): t.ObjectExpression | null => {
   const args = candidate.node.arguments;
