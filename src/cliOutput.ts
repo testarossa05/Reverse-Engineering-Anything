@@ -3,13 +3,40 @@ const UNSUPPORTED_OUTPUT_COMBINATION_MESSAGE =
 
 type StructuredOutputFormat = "json" | "jsonl" | "yaml";
 const INCUR_OUTPUT_FORMATS = new Set(["toon", "json", "yaml", "md", "jsonl"]);
+/** Global output flags that take a value. */
+const VALUED_OUTPUT_FLAGS = new Set([
+  "--format",
+  "--filter-output",
+  "--token-limit",
+  "--token-offset",
+]);
+
+/**
+ * Split `--flag=value` forms of the valued output flags. Incur reads these
+ * flags only in spaced form, so `--format=json` otherwise reaches the command
+ * parser and fails as an unknown flag. Command options accept both forms.
+ */
+export const normalizeCliOutputArguments = (
+  arguments_: readonly string[],
+): string[] =>
+  arguments_.flatMap((argument) => {
+    const separator = argument.indexOf("=");
+    if (separator < 0) return [argument];
+    const flag = argument.slice(0, separator);
+    return VALUED_OUTPUT_FLAGS.has(flag)
+      ? [flag, argument.slice(separator + 1)]
+      : [argument];
+  });
 
 export type CliOutputArgumentValidation =
   | { readonly ok: true }
   | {
       readonly ok: false;
       readonly format: StructuredOutputFormat;
-      readonly code: "UNSUPPORTED_OUTPUT_COMBINATION" | "INVALID_OUTPUT_FILTER";
+      readonly code:
+        | "UNSUPPORTED_OUTPUT_COMBINATION"
+        | "INVALID_OUTPUT_FILTER"
+        | "MISSING_OUTPUT_VALUE";
       readonly message: string;
     };
 
@@ -17,6 +44,8 @@ interface ParsedCliOutputArguments {
   readonly filterOutput: string | undefined;
   readonly format: string;
   readonly fullOutput: boolean;
+  /** First valued output flag that Incur skips because it has no value. */
+  readonly missingValue: string | undefined;
   readonly parseError: boolean;
   readonly tokenCount: boolean;
   readonly tokenWindow: boolean;
@@ -31,6 +60,7 @@ export const parseCliOutputArguments = (
   let format: string = "toon";
   let filterOutput: string | undefined;
   let fullOutput = false;
+  let missingValue: string | undefined;
   let tokenCount = false;
   let tokenLimit: number | undefined;
   let tokenOffset: number | undefined;
@@ -38,6 +68,7 @@ export const parseCliOutputArguments = (
     filterOutput,
     format,
     fullOutput,
+    missingValue,
     parseError,
     tokenCount,
     tokenWindow:
@@ -47,8 +78,8 @@ export const parseCliOutputArguments = (
   });
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
-    // Incur scans builtins across `--` and accepts only spaced value forms.
-    // Mirror those effective values at the executable output boundary.
+    // Incur scans builtins across `--` and reads spaced value forms, which
+    // normalizeCliOutputArguments has produced. Mirror those effective values.
     if (argument === "--json") {
       format = "json";
       continue;
@@ -61,14 +92,14 @@ export const parseCliOutputArguments = (
         if (!INCUR_OUTPUT_FORMATS.has(value)) return parsed(true);
         format = value;
         index += 1;
-      }
+      } else missingValue ??= argument;
       continue;
     }
     if (argument === "--filter-output") {
       if (arguments_[index + 1]) {
         filterOutput = arguments_[index + 1];
         index += 1;
-      }
+      } else missingValue ??= argument;
       continue;
     }
     if (argument === "--token-limit" || argument === "--token-offset") {
@@ -80,7 +111,7 @@ export const parseCliOutputArguments = (
         if (argument === "--token-limit") tokenLimit = numericValue;
         else tokenOffset = numericValue;
         index += 1;
-      }
+      } else missingValue ??= argument;
       continue;
     }
     if (argument === "--full-output") fullOutput = true;
@@ -111,7 +142,7 @@ const hasUnclosedFilterSlice = (expression: string): boolean => {
 export const validateCliOutputArguments = (
   arguments_: readonly string[],
 ): CliOutputArgumentValidation => {
-  const { filterOutput, format, parseError, tokenWindow } =
+  const { filterOutput, format, missingValue, parseError, tokenWindow } =
     parseCliOutputArguments(arguments_);
   if (parseError) return { ok: true };
   if (filterOutput !== undefined && hasUnclosedFilterSlice(filterOutput))
@@ -131,6 +162,15 @@ export const validateCliOutputArguments = (
       format,
       code: "UNSUPPORTED_OUTPUT_COMBINATION",
       message: UNSUPPORTED_OUTPUT_COMBINATION_MESSAGE,
+    };
+  // Incur skips a valued flag without a value and then reports the flag
+  // itself as unknown. Name the missing value instead.
+  if (missingValue !== undefined)
+    return {
+      ok: false,
+      format: format === "yaml" || format === "jsonl" ? format : "json",
+      code: "MISSING_OUTPUT_VALUE",
+      message: `${missingValue} requires a value, as in ${missingValue} <value> or ${missingValue}=<value>.`,
     };
   return { ok: true };
 };

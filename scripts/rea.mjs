@@ -74,12 +74,14 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
   const { createCliResultOutput } =
     await import("../dist/cli-runtime/cliResultOutput.js");
   const {
+    normalizeCliOutputArguments,
     renderCliOutputArgumentError,
     renderEmptyFilteredCliOutput,
     validateCliOutputArguments,
   } = await import("../dist/cli-runtime/cliOutput.js");
   guardClosedStdout();
-  const outputArguments = validateCliOutputArguments(args);
+  const cliArgs = normalizeCliOutputArguments(args);
+  const outputArguments = validateCliOutputArguments(cliArgs);
   const configurationError = cliConfigurationError(process.env);
   if (configurationError !== undefined) {
     process.stderr.write(`${configurationError}\n`);
@@ -89,8 +91,8 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
     process.exitCode = 1;
   } else {
     let wroteOutput = false;
-    const resultOutput = createCliResultOutput(args, process.stdout);
-    await createCli(process.env, resultOutput).serve(args, {
+    const resultOutput = createCliResultOutput(cliArgs, process.stdout);
+    await createCli(process.env, resultOutput).serve(cliArgs, {
       stdout: (output) => {
         if (resultOutput?.handled) {
           if (resultOutput.failed && !stdoutClosed)
@@ -104,7 +106,7 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
       exit: (code) => process.exit(stdoutClosed ? SIGPIPE_EXIT_STATUS : code),
     });
     if (!wroteOutput && !resultOutput?.handled)
-      writeStdout(renderEmptyFilteredCliOutput(args) ?? "");
+      writeStdout(renderEmptyFilteredCliOutput(cliArgs) ?? "");
   }
 }
 
