@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { access, mkdir, open, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import { SafeOutputTree } from "../../../src/artifacts/SafeOutputTree.js";
 import { SafeOutputTreeCreationFailure } from "../../../src/artifacts/SafeOutputTreeCreationFailure.js";
@@ -11,6 +13,7 @@ import {
   assertRecoveryCleanup,
   recoveryFixture,
 } from "../../fixtures/javascript-recovery/provider.js";
+import { readWithoutFifoWriter } from "../../fixtures/fifoInput.js";
 
 describe.skipIf(process.platform !== "linux" || process.arch !== "x64")(
   "Wakaru recovery boundary",
@@ -541,6 +544,33 @@ describe.skipIf(process.platform !== "linux" || process.arch !== "x64")(
       });
       if (result.ok) throw new Error("expected malformed source failure");
       expect(projectAnalysisError(result.error).code).toBe("invalid_request");
+      expect(fixture.launches).toHaveLength(0);
+      await expect(access(fixture.output)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  },
+);
+
+describe.skipIf(process.platform !== "linux" || process.arch !== "x64")(
+  "Wakaru input admission",
+  () => {
+    it("rejects a named pipe without waiting for a writer or launching recovery", async () => {
+      const fixture = await recoveryFixture();
+      const fifoPath = join(dirname(fixture.path), "pipe.js");
+      await promisify(execFile)("mkfifo", [fifoPath]);
+      const outcome = await readWithoutFifoWriter(fifoPath, () =>
+        fixture.service.recover({
+          path: fifoPath,
+          output_directory: fixture.output,
+        }),
+      );
+      if (outcome.state !== "completed")
+        throw new Error("Recovery input read waited for a FIFO writer");
+      if (outcome.result.ok) throw new Error("expected non-regular input");
+      expect(projectAnalysisError(outcome.result.error).code).toBe(
+        "invalid_request",
+      );
       expect(fixture.launches).toHaveLength(0);
       await expect(access(fixture.output)).rejects.toMatchObject({
         code: "ENOENT",
