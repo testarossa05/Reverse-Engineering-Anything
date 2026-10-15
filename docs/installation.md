@@ -541,6 +541,32 @@ search permissions (`0700`) on a directory you own before retrying.
 
 On supported Linux distributions, approved setup verifies Hopper's official
 `.deb`, `.rpm`, or Arch package before invoking the native package manager.
+The official release feed selects the current public demo without a version
+pin. REA verifies the package's detached PGP signature against Hopper's stable
+primary fingerprint `7C2D73BAFAF5B9A710A69DA1A26DF815099B1BCD`, then checks
+that the signed package and installed launcher agree with `main_exe_hash`.
+Rotating signing subkeys remain bound to that primary identity.
+The feed row itself is not PGP-signed; doctor labels its display version as
+`reported_release_version`, separately from the authenticated launcher identity.
+
+The approval plan includes the caller-selected cache location. Approved setup
+retains the signed archive, public key and release metadata under
+`${XDG_CACHE_HOME:-$HOME/.cache}/rea/hopper-releases/<launcher-sha256>`.
+An empty `XDG_CACHE_HOME` uses `$HOME/.cache`. Approved setup can repair a
+damaged caller-owned entry after authenticating a fresh package; the previous
+entry is preserved beside it as `<launcher-sha256>.backup-<id>`. Ordinary doctor
+and launches reject damaged evidence and never repair it implicitly.
+Doctor and launches authenticate this evidence for offline use; an editable
+digest receipt alone cannot authorize a launcher. Verification reuses at most
+eight immutable package proofs per process, keyed by the complete package,
+key, signature, package format and expected launcher digest. Cached file reads
+still check identity and content. Without retained evidence, inspecting an
+existing install requires the matching current official package and network
+access. Successful live inspection can be reused within that process after
+rehashing the launcher; it does not write a persistent cache or claim that a
+previously observed release is still the latest. Older uncached builds require
+an approved update while the feed exposes only its current release.
+
 REA runs the supported demo build on a private Xvfb display and selects Hopper's
 offered demo mode for each analysis session; it does not require the user's
 desktop display. Unattended package-manager access requires

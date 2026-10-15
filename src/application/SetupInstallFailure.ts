@@ -1,4 +1,5 @@
 import { HOPPER_PUBLISHER } from "../domain/hopperPublisher.js";
+import { HOPPER_LINUX_PRIMARY_FINGERPRINT } from "./HopperReleaseFeed.js";
 import type { LinuxPackageInstallFailure } from "./LinuxHopper.js";
 
 export type SetupFailureCode =
@@ -50,6 +51,8 @@ export type HopperInstallFailureReason =
   | "mount"
   | "bundle"
   | "publisher_verification_failed"
+  | "verification_unavailable"
+  | "cleanup_failed"
   | "copy";
 
 const normalizePackageOutput = (output: string): string =>
@@ -99,6 +102,7 @@ const packageManagerRemediation = (
 export const setupInstallFailure = (
   reason: HopperInstallFailureReason,
   packageFailure?: LinuxPackageInstallFailure,
+  platform: NodeJS.Platform = "darwin",
 ): SetupHopperInstallFailure => {
   switch (reason) {
     case "unsupported_host":
@@ -139,7 +143,7 @@ export const setupInstallFailure = (
         status: "failed",
         code: "unsupported_hopper_build",
         remediation:
-          "The installed Hopper launcher does not match the build supported by this REA release. Unset HOPPER_LAUNCHER_PATH, reinstall through rea setup, or update REA.",
+          "The installed Hopper launcher does not match the authenticated vendor package. Check HOPPER_LAUNCHER_PATH and reinstall the official Hopper demo through rea setup.",
       };
     case "cancelled":
       return {
@@ -173,7 +177,24 @@ export const setupInstallFailure = (
       return {
         status: "failed",
         code: "publisher_verification_failed",
-        remediation: `The mounted Hopper application is not signed by the publisher REA pins (${HOPPER_PUBLISHER.bundleIdentifier}, Apple team ${HOPPER_PUBLISHER.teamIdentifier}); nothing was copied or launched. Install Hopper yourself and set HOPPER_LAUNCHER_PATH to its launcher, then rerun rea setup.`,
+        remediation:
+          platform === "linux"
+            ? `The Hopper package signature did not verify under the pinned primary PGP fingerprint ${HOPPER_LINUX_PRIMARY_FINGERPRINT}; the package manager was not run. Download the official package and retry setup.`
+            : `The mounted Hopper application is not signed by the publisher REA pins (${HOPPER_PUBLISHER.bundleIdentifier}, Apple team ${HOPPER_PUBLISHER.teamIdentifier}); nothing was copied or launched. Install Hopper yourself and set HOPPER_LAUNCHER_PATH to its launcher, then rerun rea setup.`,
+      };
+    case "verification_unavailable":
+      return {
+        status: "failed",
+        code: "publisher_verification_failed",
+        remediation:
+          "REA could not authenticate or retain the signed Hopper package. Check vendor access, native package inspection tools and caller-owned cache permissions, then retry setup.",
+      };
+    case "cleanup_failed":
+      return {
+        status: "failed",
+        code: "cleanup_failed",
+        remediation:
+          "Hopper publisher verification retained temporary cleanup ownership. Retry cleanup before running setup again.",
       };
     case "copy":
       return {

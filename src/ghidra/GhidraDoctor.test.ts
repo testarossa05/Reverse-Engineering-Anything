@@ -69,7 +69,6 @@ const doctorHost = (
     validTarget: () => Promise.resolve(true),
     executable: (path) =>
       Promise.resolve(hopperAvailable && path.includes("Hopper")),
-    supportedLinuxHopper: () => Promise.resolve(true),
     linuxDemoRuntimeCheck: () =>
       Promise.resolve({
         name: "hopper-demo-runtime",

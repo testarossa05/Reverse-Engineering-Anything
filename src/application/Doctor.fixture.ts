@@ -1,5 +1,6 @@
 import { CATALOG_IDENTITY } from "../catalogIdentity.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
+import { ok } from "../domain/result.js";
 import type { DoctorHost } from "./Doctor.js";
 
 /** Healthy recording host for focused doctor and projection tests. */
@@ -14,7 +15,16 @@ export const createDoctorHostFixture = (
   linuxDistribution: () => Promise.resolve(undefined),
   validTarget: (path) => Promise.resolve(path.includes("Hopper")),
   executable: (path) => Promise.resolve(path.includes("Hopper")),
-  supportedLinuxHopper: () => Promise.resolve(true),
+  inspectLinuxHopper: () =>
+    Promise.resolve(
+      ok({
+        sha256: "0".repeat(64),
+        version: "fixture",
+        primaryFingerprint: "0".repeat(40),
+        signingFingerprint: "1".repeat(40),
+        source: "signed_package_cache" as const,
+      }),
+    ),
   linuxDemoRuntimeCheck: () =>
     Promise.resolve({
       name: "hopper-demo-runtime",

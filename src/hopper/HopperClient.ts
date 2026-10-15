@@ -29,6 +29,7 @@ import {
   type ProviderOperationRequest,
 } from "../domain/providerOperationHealth.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import type { ProgressReporter } from "../application/ProgressReporter.js";
 import { silentLogger } from "../logger.js";
@@ -328,7 +329,8 @@ export class HopperClient {
     if (
       this.#socket !== undefined ||
       this.#resources.launch !== undefined ||
-      this.#resources.runtimeRoot !== undefined
+      this.#resources.runtimeRoot !== undefined ||
+      this.#startupFailureResult?.cleanupIncomplete === true
     ) {
       return err(
         this.#startupFailureResult ??
@@ -563,7 +565,9 @@ export class HopperClient {
         this.#releaseTransport(),
       );
       await this.#reconnectForCleanup();
-      return await this.#cleanup(options);
+      const closed = await this.#cleanup(options);
+      if (closed.ok) this.#startupFailureResult = undefined;
+      return closed;
     } finally {
       if (this.#startPromise === starting) this.#startPromise = undefined;
       if (this.#startupController === controller) {
@@ -641,7 +645,7 @@ export class HopperClient {
     this.#closing = true;
     this.#ready = false;
     try {
-      return await cleanupHopperSession({
+      const closed = await cleanupHopperSession({
         socket: this.#socket,
         resources: this.#resources,
         activeRequest: this.#requests.activity(),
@@ -653,6 +657,26 @@ export class HopperClient {
         retainDocument: options.retainDocument === true,
         releaseTransport: () => this.#releaseTransport(),
       });
+      const launcherClosed = await this.#options.launcher
+        .cleanup?.()
+        .catch((cause: unknown) =>
+          err(
+            new ProviderCleanupError(
+              "hopper",
+              ["hopper-launcher"],
+              {
+                reason: cause instanceof Error ? cause.message : String(cause),
+              },
+              { cause },
+            ),
+          ),
+        );
+      if (launcherClosed === undefined || launcherClosed.ok) return closed;
+      return closed.ok
+        ? launcherClosed
+        : err(
+            analysisErrorWithCleanupFailure(closed.error, launcherClosed.error),
+          );
     } finally {
       if (this.#socket?.destroyed === true) this.#socket = undefined;
 

@@ -148,23 +148,34 @@ export class HopperProcessError extends HopperError {
   }
 }
 
+/** Parsed facts about rejecting an application before execution. */
+export interface HopperLaunchRejection {
+  /** The selected application was rejected before it was executed. */
+  readonly boundary: "publisher_verification";
+  /** Parsed failure reason supplied by the verification owner. */
+  readonly reason: string;
+}
+
 /** Hopper or the repository bridge could not be started. */
 export class HopperStartError extends HopperError {
   readonly _tag = "HopperStartError";
   override readonly userMessage: string | undefined;
   readonly ownerRunId: string | undefined;
   readonly launcherFailure: HopperLauncherOutcome | undefined;
+  readonly launchRejection: HopperLaunchRejection | undefined;
 
   constructor(
     options?: ErrorOptions & {
       readonly userMessage?: string;
       readonly ownerRunId?: string;
       readonly launcherFailure?: HopperLauncherOutcome;
+      readonly launchRejection?: HopperLaunchRejection;
     },
   ) {
     super("Hopper application bridge could not be started", options);
     this.userMessage = options?.userMessage;
     this.ownerRunId = options?.ownerRunId;
     this.launcherFailure = options?.launcherFailure;
+    this.launchRejection = options?.launchRejection;
   }
 }

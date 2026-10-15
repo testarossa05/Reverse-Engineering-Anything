@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 
@@ -17,8 +17,38 @@ import {
 } from "../../../../src/hopper/BridgeLauncher.js";
 
 import { ProviderProcessSupervisor } from "../../../../src/process/ProviderProcess.js";
+import { err, ok } from "../../../../src/domain/result.js";
+
+import { HopperReleaseError } from "../../../../src/application/HopperReleaseFeed.js";
+import { projectAnalysisError } from "../../../../src/domain/analysisErrorProjection.js";
+import { ArtifactResourceScope } from "../../../../src/artifacts/ArtifactResourceScope.js";
+import { PrivateRuntimeRoot } from "../../../../src/process/PrivateRuntimeRoot.js";
+import { HopperClient } from "../../../../src/hopper/HopperClient.js";
+
+const readyDirectDisplay = async () =>
+  ({
+    ok: true,
+    strategy: "direct",
+    diagnostic: {
+      component: "hopper_private_display",
+      operation: "probe",
+      status: "ready",
+      failure_code: null,
+      reason: "ready",
+      socket_directory: "/tmp/.X11-unix",
+      socket_directory_mode: "1777",
+      mount_read_only: false,
+      effective_socket_directory_mode: "1777",
+      effective_mount_read_only: false,
+      wsl: false,
+      strategy: "direct",
+      fallback_reason: null,
+      xvfb_stderr_bytes: 0,
+    },
+  }) as const;
 
 const execFileAsync = promisify(execFile);
+const verifiedSha256 = "0".repeat(64);
 const demoHelperPath = fileURLToPath(
   new URL("../../../../scripts/hopper-demo-x11.py", import.meta.url),
 );
@@ -34,13 +64,93 @@ const options = (launcherPath: string): HopperApplicationLauncherOptions => ({
   demoHelperPath: "/rea/hopper-demo-x11.py",
 });
 
+it("retains cancelled verification cleanup through client shutdown and retries it", async () => {
+  const directory = await createTestTempDirectory("rea-publisher-cancel-");
+  const targetPath = join(directory, "target");
+  await writeFile(targetPath, "source-owned target");
+  const root = await PrivateRuntimeRoot.create({
+    prefix: "rea-publisher-pending-",
+  });
+  const resources = new ArtifactResourceScope();
+  let allowCleanup = false;
+  expect(
+    await resources.release({
+      kind: "private-runtime-root",
+      resource: root.path,
+      root: {
+        path: root.path,
+        close: async () => {
+          if (!allowCleanup)
+            throw new Error("Fixture publisher cleanup denied");
+          await root.close();
+        },
+      },
+    }),
+  ).toMatchObject({ kind: "failed" });
+  const controller = new AbortController();
+  const verify = vi.fn(async () => {
+    controller.abort();
+    return err(
+      new HopperReleaseError(
+        "cleanup_failed",
+        "Publisher cleanup remains owned",
+      ),
+    );
+  });
+  const launcher = new HopperApplicationLauncher(
+    {
+      ...options(process.execPath),
+      targetPath,
+    },
+    {
+      verifyLinuxLauncher: verify,
+      retryPublisherCleanup: () => resources.close(),
+      selectPrivateDisplay: readyDirectDisplay,
+    },
+  );
+  const client = new HopperClient({ launcher, startupTimeoutMs: 5_000 });
+  try {
+    const started = await client.start(controller.signal);
+    expect(started).toMatchObject({
+      ok: false,
+      error: { cleanupIncomplete: true, cleanupResources: [root.path] },
+    });
+    if (started.ok)
+      throw new Error("Expected cancelled startup with pending cleanup");
+    expect(projectAnalysisError(started.error)).toMatchObject({
+      code: "cleanup_incomplete",
+      details: {
+        diagnostics: { primary_error: { code: "cancelled" } },
+        resources: [root.path],
+      },
+    });
+    expect(await client.start()).toMatchObject({
+      ok: false,
+      error: { cleanupIncomplete: true },
+    });
+    expect(verify).toHaveBeenCalledOnce();
+    expect(await client.close()).toMatchObject({
+      ok: false,
+      error: { cleanupIncomplete: true },
+    });
+    await access(root.path);
+    allowCleanup = true;
+    expect(await client.close()).toEqual({ ok: true, value: null });
+    await expect(access(root.path)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    allowCleanup = true;
+    await client.close();
+    await resources.close();
+  }
+});
+
 describe("Hopper bridge launcher selection", () => {
   it.each([
     "/opt/hopper/bin/Hopper",
     "/usr/local/bin/hopper",
     "/workspace/bin/hopper-wrapper",
   ])(
-    "routes launcher spelling %s through the explicitly selected pinned adapter",
+    "routes launcher spelling %s through the explicitly selected demo adapter",
     (path) => {
       expect(usesLinuxDemo(options(path))).toBe(true);
     },
@@ -71,6 +181,7 @@ describe("Hopper bridge launcher selection", () => {
       },
       ["--analysis"],
       "user-mount-namespace",
+      verifiedSha256,
     );
 
     expect(launch).toMatchObject({
@@ -90,6 +201,8 @@ describe("Hopper bridge launcher selection", () => {
         "--mount-private-x11",
         "--hopper",
         "/opt/hopper/bin/Hopper",
+        "--expected-launcher-sha256",
+        verifiedSha256,
         "--socket",
         "/tmp/rea-fixture/bridge.sock",
         "--",
@@ -113,6 +226,7 @@ describe("Hopper bridge launcher selection", () => {
         },
         [],
         "direct",
+        verifiedSha256,
       ),
     ).toMatchObject({
       command: "/usr/bin/python3",
@@ -123,6 +237,8 @@ describe("Hopper bridge launcher selection", () => {
         "direct",
         "--hopper",
         "/opt/hopper/bin/Hopper",
+        "--expected-launcher-sha256",
+        verifiedSha256,
         "--socket",
         "/tmp/rea-fixture/bridge.sock",
         "--",
@@ -131,7 +247,7 @@ describe("Hopper bridge launcher selection", () => {
     });
   });
 
-  it("rejects an unpinned wrapper before executing it", async () => {
+  it("rejects launcher bytes changed since publisher verification before executing them", async () => {
     const directory = await createTestTempDirectory("rea-hopper-wrapper-");
     const wrapper = join(directory, "hopper-wrapper");
     const marker = join(directory, "executed");
@@ -145,6 +261,8 @@ describe("Hopper bridge launcher selection", () => {
             demoHelperPath,
             "--hopper",
             wrapper,
+            "--expected-launcher-sha256",
+            verifiedSha256,
             "--socket",
             join(directory, "bridge.sock"),
             "--",
@@ -218,26 +336,15 @@ it.skipIf(process.platform !== "linux")(
         ),
       },
       {
-        selectPrivateDisplay: async () => ({
-          ok: true,
-          strategy: "direct",
-          diagnostic: {
-            component: "hopper_private_display",
-            operation: "probe",
-            status: "ready",
-            failure_code: null,
-            reason: "ready",
-            socket_directory: "/tmp/.X11-unix",
-            socket_directory_mode: "1777",
-            mount_read_only: false,
-            effective_socket_directory_mode: "1777",
-            effective_mount_read_only: false,
-            wsl: false,
-            strategy: "direct",
-            fallback_reason: null,
-            xvfb_stderr_bytes: 0,
-          },
-        }),
+        verifyLinuxLauncher: async () =>
+          ok({
+            sha256: verifiedSha256,
+            version: "fixture",
+            primaryFingerprint: "0".repeat(40),
+            signingFingerprint: "1".repeat(40),
+            source: "signed_package_cache",
+          }),
+        selectPrivateDisplay: readyDirectDisplay,
       },
     );
     const launched = await launcher.launch({
@@ -258,5 +365,45 @@ it.skipIf(process.platform !== "linux")(
       await supervisor.stop();
       await launched.value.releaseLease?.();
     }
+  },
+);
+
+it.skipIf(process.platform !== "linux")(
+  "preserves a publisher rejection through the public error without inventing a helper exit",
+  async () => {
+    const directory = await createTestTempDirectory("rea-publisher-rejection-");
+    const targetPath = join(directory, "target");
+    await writeFile(targetPath, "fixture target");
+    const rejected = new HopperReleaseError(
+      "unsupported_hopper_build",
+      "Fixture launcher is outside verified releases",
+    );
+    const launcher = new HopperApplicationLauncher(
+      { ...options("/unused/Hopper"), targetPath },
+      {
+        selectPrivateDisplay: readyDirectDisplay,
+        verifyLinuxLauncher: async () => err(rejected),
+      },
+    );
+    const result = await launcher.launch({
+      directory,
+      socketPath: join(directory, "bridge.sock"),
+      token: "fixture-token",
+      runId: randomUUID(),
+    });
+    if (result.ok) throw new Error("Unverified launcher started");
+    const projected = projectAnalysisError(result.error);
+    expect(projected).toMatchObject({
+      code: "provider_unavailable",
+      details: {
+        stage: "launch",
+        launch_rejection: {
+          boundary: "publisher_verification",
+          reason: rejected.reason,
+        },
+      },
+    });
+    expect(projected.details).not.toHaveProperty("exit_code");
+    expect(projected.details).not.toHaveProperty("launcher");
   },
 );

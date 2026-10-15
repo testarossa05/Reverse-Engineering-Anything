@@ -45,6 +45,7 @@ cliTest.skipIf(!["darwin", "linux"].includes(process.platform))(
           ? {
               PATH: [join(home, "bin"), process.env.PATH ?? ""].join(delimiter),
               REA_HOPPER_LDD_TEST_MARKER: loaderMarker,
+              NODE_OPTIONS: `--import=${new URL("../../fixtures/hopperRejectionFeed.mjs", import.meta.url).href}`,
             }
           : {}),
         HOME: home,

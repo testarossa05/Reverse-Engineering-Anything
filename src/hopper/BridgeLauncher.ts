@@ -9,6 +9,8 @@ import {
   HopperStartError,
 } from "../domain/hopperErrors.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { cleanupOwnedProcessGroup } from "../process/ProcessOwnership.js";
 import { execFileOutput } from "../process/ExecFileOutput.js";
 import {
@@ -34,6 +36,8 @@ import {
 import type { HopperTargetLease } from "./HopperTargetLease.js";
 import { HOPPER_SHUTDOWN_TIMEOUT_MS } from "./HopperSessionValues.js";
 import { verifyMacHopperNativeHelper } from "./HopperMacPublisher.js";
+import { inspectLinuxHopperLauncher } from "../application/LinuxHopper.js";
+import { retryLinuxHopperPublisherCleanup } from "../application/LinuxHopperPublisher.js";
 
 const execFileAsync = promisify(execFile);
 const HOPPER_BACKGROUND_STARTUP_MS = 5_000;
@@ -73,6 +77,8 @@ export type BridgeLaunch = {
 
 /** Application-owned capability that starts the in-Hopper bridge. */
 export interface BridgeLauncher {
+  /** Retry owned pre-launch resources even when no application was started. */
+  cleanup?(): Promise<Result<null, ProviderCleanupError>>;
   launch(
     session: BridgeSession,
     options?: { readonly signal?: AbortSignal },
@@ -110,6 +116,8 @@ export type HopperApplicationLauncherOptions =
 
 export interface HopperApplicationLauncherDependencies {
   readonly verifyNativeHelper?: typeof verifyMacHopperNativeHelper;
+  readonly verifyLinuxLauncher?: typeof inspectLinuxHopperLauncher;
+  readonly retryPublisherCleanup?: typeof retryLinuxHopperPublisherCleanup;
   readonly platform?: NodeJS.Platform;
   readonly acquireTargetLease?: typeof acquireHopperTargetLease;
   readonly acquireApplicationLease?: typeof acquireLinuxHopperApplicationLease;
@@ -139,6 +147,32 @@ export class HopperApplicationLauncher implements BridgeLauncher {
     readonly options: HopperApplicationLauncherOptions,
     readonly dependencies: HopperApplicationLauncherDependencies = {},
   ) {}
+
+  async cleanup(): Promise<Result<null, ProviderCleanupError>> {
+    if (!usesLinuxDemo(this.options)) return ok(null);
+    try {
+      await (
+        this.dependencies.retryPublisherCleanup ??
+        retryLinuxHopperPublisherCleanup
+      )();
+      return ok(null);
+    } catch (cause: unknown) {
+      const observation = ArtifactReaderFailure.cleanupObservation(
+        cause,
+        "hopper-publisher-verification",
+      );
+      return err(
+        new ProviderCleanupError(
+          "hopper",
+          observation.resources,
+          {
+            reason: observation.reason,
+          },
+          { cause },
+        ),
+      );
+    }
+  }
 
   async launch(
     session: BridgeSession,
@@ -218,6 +252,26 @@ export class HopperApplicationLauncher implements BridgeLauncher {
       if (signal?.aborted === true) return err(new HopperCancelledError());
       const display = await this.#privateDisplay(signal);
       if (!display.ok) return err(display.error);
+      let expectedLinuxSha256: string | undefined;
+      if (usesLinuxDemo(this.options)) {
+        const inspected = await (
+          this.dependencies.verifyLinuxLauncher ?? inspectLinuxHopperLauncher
+        )(this.options.launcherPath, this.options.environment, signal);
+        if (!inspected.ok)
+          return inspected.error.reason === "cancelled"
+            ? err(new HopperCancelledError())
+            : err(
+                new HopperStartError({
+                  userMessage: inspected.error.message,
+                  cause: inspected.error,
+                  launchRejection: {
+                    boundary: "publisher_verification",
+                    reason: inspected.error.reason,
+                  },
+                }),
+              );
+        expectedLinuxSha256 = inspected.value.sha256;
+      }
       const nativeHelperVerified =
         (this.dependencies.platform ?? process.platform) === "darwin" &&
         this.options.launchMode === "native" &&
@@ -236,6 +290,7 @@ export class HopperApplicationLauncher implements BridgeLauncher {
         session,
         argumentsForTarget,
         display.strategy,
+        expectedLinuxSha256,
       );
       const started = await launchHopperProcess({
         options: this.options,
@@ -449,6 +504,7 @@ export const linuxDemoLaunch = (
   session: BridgeSession,
   hopperArgs: readonly string[],
   strategy: LinuxPrivateDisplayRunnableStrategy | undefined,
+  expectedSha256?: string,
 ):
   | {
       readonly command: string;
@@ -458,6 +514,10 @@ export const linuxDemoLaunch = (
   | undefined => {
   if (!usesLinuxDemo(options) || options.demoHelperPath === undefined)
     return undefined;
+  if (expectedSha256 === undefined || !/^[a-f0-9]{64}$/u.test(expectedSha256))
+    throw new TypeError(
+      "Linux Hopper launch requires an authenticated launcher SHA-256",
+    );
   const helperArguments = [
     options.demoHelperPath,
     "--owner-stdin",
@@ -466,6 +526,8 @@ export const linuxDemoLaunch = (
     ...(strategy === "user-mount-namespace" ? ["--mount-private-x11"] : []),
     "--hopper",
     options.launcherPath,
+    "--expected-launcher-sha256",
+    expectedSha256,
     "--socket",
     session.socketPath,
     "--",
@@ -501,7 +563,7 @@ const hopperLaunchFailure = (
     ? new HopperCancelledError()
     : new HopperStartError({ cause });
 
-/** Select the version-pinned adapter from the caller's explicit launch mode. */
+/** Select the publisher-verified demo adapter from the caller's explicit launch mode. */
 export const usesLinuxDemo = (
   options: HopperApplicationLauncherOptions,
 ): options is HopperApplicationLauncherOptions & {

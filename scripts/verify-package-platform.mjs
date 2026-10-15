@@ -88,14 +88,29 @@ export async function verifyPackagePlatform({
   }
 }
 
-/** Require the declared unsupported build or an exact missing-Xvfb diagnostic, never arbitrary provider failure. */
+/** One owner for unsupported-launch evidence across package and real-Hopper verification. */
+export const isUnsupportedHopperLaunchFailure = (failure) => {
+  const details = failure?.details;
+  const unsupportedBuild =
+    details?.failure_code === "unsupported_hopper_build" &&
+    details.exit_code === 72;
+  const publisherRejection =
+    details?.stage === "launch" &&
+    details.launch_rejection?.boundary === "publisher_verification" &&
+    details.launch_rejection.reason === "unsupported_hopper_build" &&
+    details.exit_code === undefined &&
+    details.launcher === undefined;
+  return (
+    failure?.code === "provider_unavailable" &&
+    (publisherRejection || unsupportedBuild)
+  );
+};
+
+/** Require an exact pre-execution rejection, observed helper exit, or missing-Xvfb diagnostic. */
 export const assertLinuxPackageProviderFailure = (execution) => {
   const failure = json(execution.stdout);
   const details = failure?.details;
   const diagnostic = details?.diagnostics;
-  const unsupportedBuild =
-    details?.failure_code === "unsupported_hopper_build" &&
-    details.exit_code === 72;
   const missingDisplayDependency =
     details?.failure_code === "runtime_dependency_unavailable" &&
     details.exit_code === 79 &&
@@ -108,7 +123,7 @@ export const assertLinuxPackageProviderFailure = (execution) => {
   if (
     execution.status !== 1 ||
     failure?.code !== "provider_unavailable" ||
-    (!unsupportedBuild && !missingDisplayDependency)
+    (!isUnsupportedHopperLaunchFailure(failure) && !missingDisplayDependency)
   )
     throw new Error(
       `packaged Linux Hopper verification did not fail closed: ${JSON.stringify(failure)}`,
